@@ -264,7 +264,8 @@ def render_header() -> None:
 # =========================
 # Sidebar / config
 # =========================
-def config_panel() -> tuple[bytes | None, bytes | None, dict]:
+def config_panel() -> tuple[bytes | None, bytes | None, dict, bool]:
+    scan_clicked = False
     with st.sidebar:
         st.markdown("### ⚙️ Ustawienia")
         st.caption("Upload danych, konfiguracja skanera i eksport ustawień.")
@@ -272,6 +273,12 @@ def config_panel() -> tuple[bytes | None, bytes | None, dict]:
         zip_file = st.file_uploader("ZIP Stooq", type=["zip"], key="zip_file")
         list_file = st.file_uploader("wig_lista.txt", type=["txt"], key="list_file")
         cfg_upload = st.file_uploader("Wczytaj config.json", type=["json"], key="cfg_upload")
+
+        if zip_file and list_file:
+            st.markdown("---")
+            scan_clicked = st.button("SKANUJ", type="primary", use_container_width=True)
+            st.caption("Kliknij SKANUJ, aby uruchomić skanowanie.")
+            st.markdown("---")
 
         if cfg_upload is not None:
             try:
@@ -330,7 +337,7 @@ def config_panel() -> tuple[bytes | None, bytes | None, dict]:
         )
 
         st.session_state.config = dict(cfg)
-        return zip_file.getvalue() if zip_file else None, list_file.getvalue() if list_file else None, cfg
+        return zip_file.getvalue() if zip_file else None, list_file.getvalue() if list_file else None, cfg, scan_clicked
 
 
 # =========================
@@ -737,12 +744,13 @@ def main() -> None:
     inject_css()
     render_header()
 
-    zip_bytes, list_bytes, cfg = config_panel()
+    zip_bytes, list_bytes, cfg, scan_clicked = config_panel()
 
     top_left, top_right = st.columns([0.68, 3.02], gap="large")
 
-    if zip_bytes and list_bytes:
+    if zip_bytes and list_bytes and scan_clicked:
         try:
+            st.session_state.run_nonce += 1
             artifacts = run_scan_cached(zip_bytes, list_bytes, json.dumps(cfg, ensure_ascii=False, sort_keys=True), st.session_state.run_nonce)
             st.session_state.artifacts = artifacts
         except Exception as exc:
@@ -751,7 +759,7 @@ def main() -> None:
 
     artifacts = st.session_state.artifacts
     if artifacts is None:
-        st.info("Wgraj ZIP Stooq i wig_lista.txt w panelu po lewej, aby uruchomić skaner.")
+        st.info("Wgraj ZIP Stooq i wig_lista.txt w panelu po lewej, następnie kliknij SKANUJ.")
         return
 
     with top_right:
@@ -763,17 +771,18 @@ def main() -> None:
         download3.download_button("⬇️ Audit JSONL", data=make_audit_jsonl_bytes(artifacts.audit_rows), file_name="audit.jsonl", mime="application/json", use_container_width=True)
 
     with top_left:
-        render_shortlist_controls(artifacts)
-        st.markdown('<div class="panel-card" style="margin-top:12px;"><div class="panel-title">🔎 Pełna lista symboli</div><div class="panel-sub">Wyszukiwarka całego rankingu, niezależna od shortlisty.</div></div>', unsafe_allow_html=True)
-        symbols = artifacts.df_rank["Symbol"].tolist() if not artifacts.df_rank.empty else []
-        selected = st.selectbox("Wybierz symbol", options=symbols, index=symbols.index(pick_selected_symbol(artifacts)) if symbols and pick_selected_symbol(artifacts) in symbols else 0)
-        if selected != st.session_state.selected_symbol:
-            st.session_state.selected_symbol = selected
-            st.rerun()
+        with st.container(height=850):
+            render_shortlist_controls(artifacts)
+            st.markdown('<div class="panel-card" style="margin-top:12px;"><div class="panel-title">🔎 Pełna lista symboli</div><div class="panel-sub">Wyszukiwarka całego rankingu, niezależna od shortlisty.</div></div>', unsafe_allow_html=True)
+            symbols = artifacts.df_rank["Symbol"].tolist() if not artifacts.df_rank.empty else []
+            selected = st.selectbox("Wybierz symbol", options=symbols, index=symbols.index(pick_selected_symbol(artifacts)) if symbols and pick_selected_symbol(artifacts) in symbols else 0)
+            if selected != st.session_state.selected_symbol:
+                st.session_state.selected_symbol = selected
+                st.rerun()
 
-        if not artifacts.df_err.empty:
-            with st.expander(f"⚠️ Errors ({len(artifacts.df_err)})"):
-                st.dataframe(artifacts.df_err, use_container_width=True, hide_index=True)
+            if not artifacts.df_err.empty:
+                with st.expander(f"⚠️ Errors ({len(artifacts.df_err)})"):
+                    st.dataframe(artifacts.df_err, use_container_width=True, hide_index=True)
 
     st.session_state.selected_symbol = pick_selected_symbol(artifacts)
     if st.session_state.selected_symbol is None:
@@ -786,7 +795,8 @@ def main() -> None:
         return
 
     with top_right:
-        render_selected_symbol(artifacts, payload)
+        with st.container(height=850):
+            render_selected_symbol(artifacts, payload)
 
 
 if __name__ == "__main__":
