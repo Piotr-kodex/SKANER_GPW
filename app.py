@@ -299,7 +299,10 @@ def config_panel() -> tuple[bytes | None, bytes | None, dict, bool]:
         c3, c4, c5 = st.columns(3)
         cfg["EMA_FAST_D"] = c3.number_input("EMA fast", min_value=5, max_value=20, value=int(cfg["EMA_FAST_D"]))
         cfg["EMA_SLOW_D"] = c4.number_input("EMA slow", min_value=15, max_value=60, value=int(cfg["EMA_SLOW_D"]))
-        cfg["ADX_REF_LINE"] = c5.number_input("ADX line", min_value=10, max_value=40, value=int(cfg["ADX_REF_LINE"]))
+        cfg["ADX_REF_LINE"] = c5.number_input("ADX line", min_value=10, max_value=40, value=int(cfg["ADX_REF_LINE"]), help="Linia na wykresie i próg dla badge Trend OK")
+
+        cfg["SCORE10_ADX_THRESHOLD"] = st.slider("ADX próg (skan)", min_value=10, max_value=30, value=int(cfg["SCORE10_ADX_THRESHOLD"]), step=1, help="Min. ADX dla punktu w Score10/4. ≥ próg = +1 pt.")
+        cfg["SCORE4_ADX_THRESHOLD"] = cfg["SCORE10_ADX_THRESHOLD"]
 
         st.markdown("#### 📋 Shortlisty")
         c6, c7, c8 = st.columns(3)
@@ -315,8 +318,6 @@ def config_panel() -> tuple[bytes | None, bytes | None, dict, bool]:
 
         st.markdown("#### 🧮 Widok")
         cfg["TOP_N_TABLES"] = st.slider("Top N", min_value=10, max_value=100, value=int(cfg["TOP_N_TABLES"]), step=5)
-        cfg["SCORE10_ADX_THRESHOLD"] = st.slider("ADX threshold", min_value=10, max_value=30, value=int(cfg["SCORE10_ADX_THRESHOLD"]), step=1)
-        cfg["SCORE4_ADX_THRESHOLD"] = cfg["SCORE10_ADX_THRESHOLD"]
 
         st.markdown("---")
         b1, b2 = st.columns(2)
