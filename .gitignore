@@ -1,6 +1,12 @@
 __pycache__/
 *.pyc
 .venv/
+<<<<<<< HEAD
 .env
 outputs/
 .DS_Store
+=======
+.vscode/
+.DS_Store
+out/
+>>>>>>> origin/main
