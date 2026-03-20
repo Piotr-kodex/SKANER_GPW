@@ -311,25 +311,45 @@ def build_quality(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return out
 
 
-def run_scan(zip_bytes: bytes, list_bytes: bytes, config: dict) -> ScanArtifacts:
+def run_scan(zip_bytes: bytes | None, list_bytes: bytes | None, config: dict, supabase_df: pd.DataFrame | None = None) -> ScanArtifacts:
     tz = pytz.timezone("Europe/Warsaw")
     run_ts_local = datetime.now(tz).isoformat()
     run_ts_utc = datetime.now(timezone.utc).isoformat()
 
-    gpw = load_gpw_list_from_bytes(list_bytes)
-    zip_obj = open_zip_from_bytes(zip_bytes)
-    zip_index = build_zip_index(zip_obj)
-    gpw["ZipMember"] = gpw["Key"].map(zip_index)
+    zip_obj = None
+    zip_index = {}
+
+    if supabase_df is not None and not supabase_df.empty:
+        unique_symbols = supabase_df['Nazwa'].unique()
+        gpw = pd.DataFrame({'Symbol': unique_symbols, 'Nazwa': unique_symbols})
+        gpw["Key"] = gpw["Symbol"].map(norm_ticker)
+        gpw["ZipMember"] = gpw["Nazwa"]
+    else:
+        if zip_bytes is None or list_bytes is None:
+            raise ValueError("Musisz podać albo (zip_bytes + list_bytes) albo supabase_df")
+        gpw = load_gpw_list_from_bytes(list_bytes)
+        zip_obj = open_zip_from_bytes(zip_bytes)
+        zip_index = build_zip_index(zip_obj)
+        gpw["ZipMember"] = gpw["Key"].map(zip_index)
 
     def load_benchmark_daily() -> Optional[pd.DataFrame]:
-        member = zip_index.get(norm_ticker(config["BENCHMARK_SYMBOL"]))
-        if not member:
+        if zip_obj:
+            member = zip_index.get(norm_ticker(config["BENCHMARK_SYMBOL"]))
+            if not member:
+                return None
+            df_d, _ = load_daily_from_zip(zip_obj, member)
+            df_d = df_d.rename(columns=str.lower)
+            if df_d.empty or len(df_d) < 200:
+                return None
+            return df_d
+        elif supabase_df is not None:
+            bench_symbol = config["BENCHMARK_SYMBOL"]
+            bench_data = supabase_df[supabase_df['Nazwa'] == bench_symbol].copy()
+            if not bench_data.empty:
+                bench_data = bench_data.set_index('Data').sort_index()
+                return bench_data
             return None
-        df_d, _ = load_daily_from_zip(zip_obj, member)
-        df_d = df_d.rename(columns=str.lower)
-        if df_d.empty or len(df_d) < 200:
-            return None
-        return df_d
+        return None
 
     bench_d = load_benchmark_daily()
 
@@ -345,8 +365,20 @@ def run_scan(zip_bytes: bytes, list_bytes: bytes, config: dict) -> ScanArtifacts
     for r in gpw_ok.itertuples(index=False):
         symbol, name, member = r.Symbol, r.Nazwa, r.ZipMember
         try:
-            df_d, ticker_from_file = load_daily_from_zip(zip_obj, member)
-            df_d = df_d.rename(columns=str.lower)
+            if supabase_df is not None:
+                df_d = supabase_df[supabase_df['Nazwa'] == name].copy()
+                if df_d.empty:
+                    df_d = supabase_df[supabase_df['Nazwa'] == symbol].copy()
+                if not df_d.empty:
+                    df_d = df_d.set_index('Data').sort_index()
+                    ticker_from_file = symbol
+                else:
+                    df_d = pd.DataFrame()
+                    ticker_from_file = None
+            else:
+                df_d, ticker_from_file = load_daily_from_zip(zip_obj, member)
+                df_d = df_d.rename(columns=str.lower)
+
             if df_d.empty:
                 errors.append({"Symbol": symbol, "Nazwa": name, "Stage": "compute", "Error": "Brak danych dziennych"})
                 continue
@@ -438,7 +470,8 @@ def run_scan(zip_bytes: bytes, list_bytes: bytes, config: dict) -> ScanArtifacts
         except Exception as exc:
             errors.append({"Symbol": symbol, "Nazwa": name, "Stage": "exception", "Error": str(exc)})
 
-    zip_obj.close()
+    if zip_obj:
+        zip_obj.close()
 
     df_rank = pd.DataFrame(rows)
     df_err = pd.DataFrame(errors)
