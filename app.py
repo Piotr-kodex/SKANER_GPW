@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pandas as pd
@@ -18,8 +19,18 @@ from src.config import (
 from src.reporting import make_audit_jsonl_bytes, make_excel_bytes, make_summary_html
 from src.scanner import ScanArtifacts, run_scan
 
+# Supabase data service
+from src.data_service.gpw_downloader import cleanup_old_files, download_data_incremental, load_and_process_data, prepare_data_for_strategy
+from src.data_service.supabase_client import delete_files, list_files
 
 st.set_page_config(page_title="GPW_SCAN Terminal", layout="wide", page_icon="📈")
+
+
+# --- CACHED DATA LOADER ---
+@st.cache_data(ttl=3600)
+def get_gpw_data():
+    """Pobiera i cache'uje dane z Supabase."""
+    return load_and_process_data()
 
 
 # =========================
@@ -264,21 +275,60 @@ def render_header() -> None:
 # =========================
 # Sidebar / config
 # =========================
-def config_panel() -> tuple[bytes | None, bytes | None, dict, bool]:
+def config_panel() -> tuple[str, bytes | None, bytes | None, dict, bool]:
     scan_clicked = False
     with st.sidebar:
         st.markdown("### ⚙️ Ustawienia")
         st.caption("Upload danych, konfiguracja skanera i eksport ustawień.")
 
-        zip_file = st.file_uploader("ZIP Stooq", type=["zip"], key="zip_file")
-        list_file = st.file_uploader("wig_lista.txt", type=["txt"], key="list_file")
-        cfg_upload = st.file_uploader("Wczytaj config.json", type=["json"], key="cfg_upload")
+        data_source = st.radio("Źródło danych:", ["Upload ZIP (Stooq)", "Supabase (GPW)"], horizontal=True)
 
-        if zip_file and list_file:
-            st.markdown("---")
-            scan_clicked = st.button("SKANUJ", type="primary", use_container_width=True)
-            st.caption("Kliknij SKANUJ, aby uruchomić skanowanie.")
-            st.markdown("---")
+        zip_file = None
+        list_file = None
+
+        if data_source == "Upload ZIP (Stooq)":
+            zip_file = st.file_uploader("ZIP Stooq", type=["zip"], key="zip_file")
+            list_file = st.file_uploader("wig_lista.txt", type=["txt"], key="list_file")
+        else:
+            st.info("Dane zostaną pobrane z cache aplikacji (jeśli były już wczytane) lub pobrane z Supabase.")
+        
+        cfg_upload = st.file_uploader("Wczytaj config.json", type=["json"], key="cfg_upload")
+        
+        st.divider()
+        st.markdown("### ☁️ Pobieranie danych (GPW -> Supabase)")
+        days_input = st.number_input("Zakres analizy (dni wstecz)", min_value=1, max_value=2000, value=370)
+
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("Pobierz braki"):
+                start_time = time.time()
+                progress_bar = st.progress(0, text="Analiza plików...")
+                
+                cleanup_old_files(days_input)
+                downloaded = download_data_incremental(days_input, progress_bar)
+                
+                progress_bar.empty()
+                st.success(f"Pobrano {downloaded} nowych plików w {time.time() - start_time:.2f}s.")
+                st.cache_data.clear()
+
+        with col2:
+            if st.button("Resetuj dane"):
+                files = list_files()
+                parquet_files = [f.get('name') for f in files if f.get('name', '').endswith(".parquet")]
+                
+                if parquet_files:
+                    delete_files(parquet_files)
+                    st.toast(f"Usunięto {len(parquet_files)} plików.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.info("Brak plików do usunięcia.")
+
+        st.markdown("---")
+        scan_clicked = st.button("SKANUJ", type="primary", use_container_width=True)
+        st.caption("Kliknij SKANUJ, aby uruchomić skanowanie.")
+        st.markdown("---")
 
         if cfg_upload is not None:
             try:
@@ -338,16 +388,16 @@ def config_panel() -> tuple[bytes | None, bytes | None, dict, bool]:
         )
 
         st.session_state.config = dict(cfg)
-        return zip_file.getvalue() if zip_file else None, list_file.getvalue() if list_file else None, cfg, scan_clicked
+        return data_source, zip_file.getvalue() if zip_file else None, list_file.getvalue() if list_file else None, cfg, scan_clicked
 
 
 # =========================
 # Run scan
 # =========================
 @st.cache_data(show_spinner=False)
-def run_scan_cached(zip_bytes: bytes, list_bytes: bytes, cfg_json: str, nonce: int) -> ScanArtifacts:
+def run_scan_cached(zip_bytes: bytes | None, list_bytes: bytes | None, supabase_df: pd.DataFrame | None, cfg_json: str, nonce: int) -> ScanArtifacts:
     cfg = json.loads(cfg_json)
-    return run_scan(zip_bytes, list_bytes, cfg)
+    return run_scan(zip_bytes, list_bytes, cfg, supabase_df)
 
 
 # =========================
@@ -745,22 +795,54 @@ def main() -> None:
     inject_css()
     render_header()
 
-    zip_bytes, list_bytes, cfg, scan_clicked = config_panel()
+    data_source, zip_bytes, list_bytes, cfg, scan_clicked = config_panel()
 
     top_left, top_right = st.columns([0.68, 3.02], gap="large")
 
-    if zip_bytes and list_bytes and scan_clicked:
+    if scan_clicked:
         try:
             st.session_state.run_nonce += 1
-            artifacts = run_scan_cached(zip_bytes, list_bytes, json.dumps(cfg, ensure_ascii=False, sort_keys=True), st.session_state.run_nonce)
-            st.session_state.artifacts = artifacts
+            if data_source == "Upload ZIP (Stooq)":
+                if not zip_bytes or not list_bytes:
+                    st.error("Wgraj ZIP i listę spółek.")
+                    st.stop()
+                with st.spinner("Liczenie (ZIP)..."):
+                    start_engine = time.time()
+                    artifacts = run_scan_cached(zip_bytes, list_bytes, None, json.dumps(cfg, ensure_ascii=False, sort_keys=True), st.session_state.run_nonce)
+                    end_engine = time.time()
+                    print(f"INFO: Skaner (ZIP) zakonczyl prace w {end_engine - start_engine:.2f}s.")
+                    st.session_state.artifacts = artifacts
+            else:
+                status_placeholder = st.empty()
+                status_placeholder.info("Pobieranie danych z Supabase (lub cache)...")
+
+                start_db = time.time()
+                df_raw = get_gpw_data()
+                end_db = time.time()
+                print(f"INFO: Pobrano dane z Supabase w {end_db - start_db:.2f}s.")
+
+                if df_raw is None or df_raw.empty:
+                    st.error("Brak danych w Supabase. Użyj panelu bocznego, aby pobrać dane.")
+                    st.stop()
+
+                status_placeholder.info("Uruchamianie skanera (liczenie wskaźników)...")
+                df_strategy = prepare_data_for_strategy(df_raw)
+
+                start_engine = time.time()
+                artifacts = run_scan_cached(None, None, df_strategy, json.dumps(cfg, ensure_ascii=False, sort_keys=True), st.session_state.run_nonce)
+                end_engine = time.time()
+                print(f"INFO: Skaner (Supabase) zakonczyl prace w {end_engine - start_engine:.2f}s.")
+
+                st.session_state.artifacts = artifacts
+                status_placeholder.empty()
+
         except Exception as exc:
             st.error(f"Błąd skanowania: {exc}")
             st.stop()
 
     artifacts = st.session_state.artifacts
     if artifacts is None:
-        st.info("Wgraj ZIP Stooq i wig_lista.txt w panelu po lewej, następnie kliknij SKANUJ.")
+        st.info("Wybierz źródło danych w panelu po lewej, wgraj pliki jeśli trzeba, a następnie kliknij SKANUJ.")
         return
 
     with top_right:
